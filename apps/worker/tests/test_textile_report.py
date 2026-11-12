@@ -138,3 +138,43 @@ async def test_publish_report_uploads_markdown(patch_client, monkeypatch):
     document_id = await tr.publish_report("# rapport", "rapport.md", "lib-1")
 
     assert document_id == "doc-42"
+
+
+class FakeOutlookClient:
+    def __init__(self):
+        self.calls = []
+
+    async def call_tool(self, tool_name, arguments):
+        self.calls.append((tool_name, arguments))
+
+
+async def test_send_report_email_calls_outlook():
+    client = FakeOutlookClient()
+
+    await tr.send_report_email.__original_func__(
+        "dest@example.org", "Sujet", "# rapport", outlook=client
+    )
+
+    assert len(client.calls) == 1
+    tool_name, arguments = client.calls[0]
+    assert tool_name == tr.EMAIL_TOOL_NAME
+    assert arguments["to"] == ["dest@example.org"]
+    assert arguments["subject"] == "Sujet"
+    assert arguments["body"] == "# rapport"
+
+
+async def test_email_arguments_shape():
+    arguments = tr._email_arguments("a@b.fr", "s", "md")
+
+    assert set(arguments) == {"to", "subject", "body", "body_content_type"}
+    assert arguments["to"] == ["a@b.fr"]
+    assert arguments["body_content_type"] == "markdown"
+
+
+def test_research_prompt_uses_categories():
+    for category in tr.CATEGORIES:
+        assert category in tr.RESEARCH_PROMPT
+    assert "Marché & filière" in tr.SYNTHESIS_PROMPT
+    assert "Réglementation" in tr.SYNTHESIS_PROMPT
+    assert "Innovation & R&D" in tr.SYNTHESIS_PROMPT
+    assert "Appels à projets & événements" in tr.SYNTHESIS_PROMPT
