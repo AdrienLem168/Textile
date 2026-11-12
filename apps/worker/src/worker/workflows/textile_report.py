@@ -1,8 +1,9 @@
 """Veille hebdomadaire sur les déchets textiles : Europe, France, Normandie.
 
 Le workflow collecte les actualités des 7 derniers jours par recherche web,
-les synthétise en un rapport en français, puis le publie dans une
-bibliothèque de documents Mistral si un identifiant de bibliothèque est fourni.
+les synthétise en un rapport en français organisé par rubrique, l'envoie par
+e-mail via le connecteur Outlook, puis le publie dans une bibliothèque de
+documents Mistral si un identifiant de bibliothèque est fourni.
 """
 
 import io
@@ -15,6 +16,24 @@ import pydantic
 import mistralai.workflows as workflows
 from mistralai.client import Mistral
 from mistralai.client.models import File, WebSearchTool
+from mistralai.workflows import Depends
+from mistralai.workflows.plugins.mistralai.connectors import (
+    ToolCallClient,
+    connector,
+    uses_connectors,
+)
+
+outlook_connector = connector("outlook", run_as="deployment")
+
+DEFAULT_RECIPIENT = "adrien.lemaitre@ademe.fr"
+EMAIL_TOOL_NAME = "send_email"
+
+CATEGORIES: dict[str, str] = {
+    "marche_filiere": "Marché & filière (collecte, tri, réemploi, recyclage, acteurs, projets industriels, chiffres clés)",
+    "reglementation": "Réglementation (lois, directives, REP, politiques publiques)",
+    "innovation_rd": "Innovation & R&D (technologies, projets de recherche, études)",
+    "appels_evenements": "Appels à projets & événements (financements, appels, conférences, salons, webinaires)",
+}
 
 RESEARCH_MODEL = "mistral-medium-latest"
 REPORT_MODEL = "mistral-medium-latest"
@@ -69,7 +88,7 @@ Une actualité plus ancienne n'est acceptable que si une information nouvelle ma
 
 Réponds UNIQUEMENT avec un tableau JSON (aucun texte autour) où chaque élément a les clés : \
 "title", "date" (AAAA-MM-JJ si connue, sinon null), "source" (nom du média ou site), "url", \
-"summary", "topics" (liste parmi : reglementation, filiere, innovation, financements, evenement, donnees).
+"summary", "categories" (liste parmi : marche_filiere, reglementation, innovation_rd, appels_evenements).
 Si aucune actualité n'est trouvée, réponds avec un tableau vide []."""
 
 SYNTHESIS_PROMPT = """Tu es un analyste senior de l'économie circulaire des textiles.
@@ -86,9 +105,12 @@ Structure attendue :
 ## Europe
 ## France
 ## Normandie
-Pour chaque section : une introduction d'une phrase sur l'actualité du périmètre, puis une sous-section \
-par actualité sous la forme `### [Titre](url)` suivie du résumé, de la source et de la date. \
-Si aucune actualité n'a été trouvée pour un périmètre, écris une phrase l'indiquant explicitement.
+Pour chaque périmètre, une introduction d'une phrase sur l'actualité, puis quatre sous-sections \
+au format `### [Rubrique]` dans cet ordre exact : Marché & filière, Réglementation, Innovation & R&D, \
+Appels à projets & événements. Dans chaque rubrique, liste les actualités concernées sous la forme \
+`#### [Titre](url)` suivie du résumé, de la source et de la date ; si la rubrique ne contient rien, \
+écris une phrase l'indiquant explicitement. Si aucune actualité n'a été trouvée pour un périmètre, \
+écris une phrase l'indiquant explicitement dans les quatre rubriques.
 
 ## À suivre
 Échéances réglementaires, événements et signaux à surveiller dans les semaines qui viennent.
@@ -109,6 +131,7 @@ def get_mistral_client() -> Mistral:
 class ReportInput(pydantic.BaseModel):
     weeks_back: int = 1
     library_id: str | None = None
+    recipient_email: str | None = None
     dry_run: bool = False
 
 
@@ -117,6 +140,7 @@ class ReportOutput(pydantic.BaseModel):
     period_end: str
     items_count: int
     report_markdown: str
+    email_sent: bool = False
     library_document_id: str | None = None
 
 
@@ -197,15 +221,40 @@ async def publish_report(markdown: str, filename: str, library_id: str | None) -
     return document.id
 
 
+@workflows.activity(start_to_close_timeout=timedelta(minutes=5), retry_policy_max_attempts=3)
+async def send_report_email(
+    recipient: str,
+    subject: str,
+    markdown: str,
+    outlook: ToolCallClient = Depends(outlook_connector),
+) -> None:
+    """Envoie le rapport par e-mail via le connecteur Outlook."""
+    await outlook.call_tool(
+        tool_name=EMAIL_TOOL_NAME,
+        arguments=_email_arguments(recipient, subject, markdown),
+    )
+
+
+def _email_arguments(recipient: str, subject: str, markdown: str) -> dict[str, Any]:
+    return {
+        "to": [recipient],
+        "subject": subject,
+        "body": markdown,
+        "body_content_type": "markdown",
+    }
+
+
 @workflows.workflow.define(
     name="textile-waste-weekly-report",
     workflow_display_name="Veille hebdomadaire déchets textiles",
     workflow_description=(
         "Rapport hebdomadaire sur les déchets textiles en Europe, en France et en "
         "Normandie : recherche web des actualités de la semaine, synthèse en français "
-        "et publication dans une bibliothèque de documents Mistral."
+        "organisée par rubrique, envoi par e-mail via Outlook et publication dans une "
+        "bibliothèque de documents Mistral."
     ),
 )
+@uses_connectors(outlook_connector)
 class TextileWasteReportWorkflow:
     @workflows.workflow.entrypoint
     async def run(self, input: ReportInput) -> ReportOutput:
@@ -223,8 +272,20 @@ class TextileWasteReportWorkflow:
 
         report_markdown = await synthesize_report(items, period_start, period_end)
 
+        email_sent = False
         document_id: str | None = None
         if not input.dry_run:
+            recipient = (
+                input.recipient_email
+                or os.environ.get("REPORT_EMAIL_RECIPIENT")
+                or DEFAULT_RECIPIENT
+            )
+            await send_report_email(
+                recipient,
+                f"Veille déchets textiles — semaine du {period_start} au {period_end}",
+                report_markdown,
+            )
+            email_sent = True
             document_id = await publish_report(
                 report_markdown,
                 f"veille-dechets-textiles-{period_start}.md",
@@ -236,5 +297,6 @@ class TextileWasteReportWorkflow:
             period_end=period_end,
             items_count=len(items),
             report_markdown=report_markdown,
+            email_sent=email_sent,
             library_document_id=document_id,
         )

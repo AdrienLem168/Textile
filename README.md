@@ -12,17 +12,27 @@ liés aux déchets textiles à trois périmètres : Europe, France, Normandie.
    professionnelles et locales).
 2. **Synthèse** — une activité LLM rédige le rapport en français
    (`synthesize_report`) : « L'essentiel de la semaine », sections Europe /
-   France / Normandie avec liens sources, « À suivre », « Sources ».
-3. **Publication** — le rapport Markdown est déposé dans une bibliothèque de
+   France / Normandie, chacune organisée en quatre rubriques (Marché & filière,
+   Réglementation, Innovation & R&D, Appels à projets & événements), avec liens
+   sources, « À suivre », « Sources ».
+3. **Envoi par e-mail** — le rapport est envoyé via le connecteur Outlook
+   (`send_report_email`) au destinataire défini par l'input `recipient_email`,
+   la variable d'environnement `REPORT_EMAIL_RECIPIENT` ou, à défaut,
+   `adrien.lemaitre@ademe.fr`. L'étape est ignorée en mode `dry_run`.
+4. **Publication** — le rapport Markdown est déposé dans une bibliothèque de
    documents Mistral (`publish_report`) si `library_id` est fourni (input ou
    variable d'environnement `REPORT_LIBRARY_ID`).
 
 ## Workflow
 
 - Nom : `textile-waste-weekly-report`
-- Entrée : `{"weeks_back": 1, "library_id": null, "dry_run": false}`
-- Sortie : période couverte, nombre d'actualités, rapport Markdown, identifiant
-  du document publié.
+- Entrée : `{"weeks_back": 1, "library_id": null, "recipient_email": null, "dry_run": false}`
+- Sortie : période couverte, nombre d'actualités, rapport Markdown, e-mail envoyé
+  (oui/non), identifiant du document publié.
+
+Le connecteur Outlook est déclaré avec `run_as="deployment"` : l'envoi automatisé
+du lundi matin utilise les credentials du déploiement, qui doivent être ajoutés
+une fois dans Studio (Connectors → Outlook → onglet Credentials).
 
 ## Développement local
 
@@ -49,7 +59,7 @@ curl -X POST "https://api.mistral.ai/v1/workflows/schedules" \
     "workflow_identifier": "textile-waste-weekly-report",
     "schedule": {
       "input": {},
-      "cron_expressions": ["0 7 * * 1"],
+      "cron_expressions": ["0 8 * * 1"],
       "time_zone_name": "Europe/Paris"
     }
   }'
